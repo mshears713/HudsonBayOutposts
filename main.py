@@ -15,6 +15,7 @@ user interaction.
 import streamlit as st
 from pathlib import Path
 import sys
+import logging
 
 # Add src directory to Python path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -23,6 +24,19 @@ from src.models import UserProfile, ChapterStatus
 from src.models.outpost import Outpost, OutpostType, OutpostStatus
 from src.ui.chapters.chapter1 import render_chapter1_page
 from src.ui.chapters.chapter2 import render_chapter2_page
+from src.ui.error_handling import (
+    ErrorBoundary,
+    handle_errors,
+    display_error,
+    ErrorDetails,
+    ErrorSeverity,
+    ErrorCategory,
+    ValidationError,
+    validate_not_empty,
+    validate_ip_address,
+    validate_port,
+    logger
+)
 
 # Page configuration
 st.set_page_config(
@@ -33,6 +47,7 @@ st.set_page_config(
 )
 
 
+@handle_errors(user_message="Failed to initialize application", show_traceback=False)
 def initialize_session_state():
     """
     Initialize Streamlit session state variables.
@@ -42,25 +57,32 @@ def initialize_session_state():
     It's similar to cookies or local storage in web development.
     Each user session has its own isolated state.
     """
-    # Initialize user profile if not exists
-    if 'user_profile' not in st.session_state:
-        st.session_state.user_profile = UserProfile(
-            username="explorer",
-            display_name="Frontier Explorer",
-            email=None
-        )
+    with ErrorBoundary("session state initialization"):
+        # Initialize user profile if not exists
+        if 'user_profile' not in st.session_state:
+            st.session_state.user_profile = UserProfile(
+                username="explorer",
+                display_name="Frontier Explorer",
+                email=None
+            )
 
-    # Initialize outposts list if not exists
-    if 'outposts' not in st.session_state:
-        st.session_state.outposts = []
+        # Initialize outposts list if not exists
+        if 'outposts' not in st.session_state:
+            st.session_state.outposts = []
 
-    # Initialize current page if not exists
-    if 'current_page' not in st.session_state:
-        st.session_state.current_page = "Home"
+        # Initialize current page if not exists
+        if 'current_page' not in st.session_state:
+            st.session_state.current_page = "Home"
 
-    # Initialize demo mode flag
-    if 'demo_mode' not in st.session_state:
-        st.session_state.demo_mode = False
+        # Initialize demo mode flag
+        if 'demo_mode' not in st.session_state:
+            st.session_state.demo_mode = False
+
+        # Initialize error log if not exists
+        if 'error_log' not in st.session_state:
+            st.session_state.error_log = []
+
+        logger.info("Session state initialized successfully")
 
 
 def render_sidebar():
