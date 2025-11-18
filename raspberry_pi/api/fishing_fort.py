@@ -13,7 +13,7 @@ To run this API:
     uvicorn raspberry_pi.api.fishing_fort:app --host 0.0.0.0 --port 8000 --reload
 """
 
-from fastapi import FastAPI, HTTPException, Query, Path, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, Path, UploadFile, File, Depends
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -23,6 +23,9 @@ from pathlib import Path as FilePath
 import logging
 import os
 import shutil
+
+# Import authentication middleware
+from .auth_middleware import add_auth_routes, get_current_user, User
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -122,6 +125,10 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Educational Note: Add authentication routes to the API
+# This provides /auth/login, /auth/me, and /auth/users endpoints
+add_auth_routes(app)
 
 
 # ============================================================================
@@ -877,6 +884,320 @@ async def get_disk_usage():
     except Exception as e:
         logger.error(f"Error getting disk usage: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get disk usage: {str(e)}")
+
+
+# ============================================================================
+# Data Synchronization Endpoints
+# ============================================================================
+
+@app.post("/sync/export-inventory", tags=["Synchronization"])
+async def export_inventory_for_sync(current_user: User = Depends(get_current_user)):
+    """
+    Export inventory data for synchronization with another fort.
+
+    Educational Note:
+    Data synchronization between distributed systems is essential for
+    maintaining consistency. This endpoint provides a snapshot of inventory
+    that can be imported by another fort.
+
+    Returns:
+        Complete inventory export with metadata
+
+    Example Usage:
+        # Fort A exports data
+        export_data = fishing_fort.export_inventory_for_sync()
+
+        # Fort B imports the data
+        trading_fort.import_inventory_from_sync(export_data)
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM inventory ORDER BY item_id")
+        rows = cursor.fetchall()
+        conn.close()
+
+        inventory = [dict_from_row(row) for row in rows]
+
+        logger.info(f"Inventory exported for sync by {current_user.username}")
+
+        return {
+            "source_fort": "fishing_fort",
+            "export_timestamp": datetime.now().isoformat(),
+            "exported_by": current_user.username,
+            "item_count": len(inventory),
+            "inventory": inventory,
+            "sync_format_version": "1.0"
+        }
+
+    except Exception as e:
+        logger.error(f"Error exporting inventory: {e}")
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+@app.post("/sync/import-inventory", tags=["Synchronization"])
+async def import_inventory_from_sync(
+    sync_data: Dict[str, Any],
+    merge_strategy: str = Query("add", pattern="^(add|replace|merge)$"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Import inventory data from another fort.
+
+    Educational Note:
+    This demonstrates different data merge strategies:
+    - 'add': Add new items, skip existing ones
+    - 'replace': Replace all data with imported data
+    - 'merge': Update quantities for existing items
+
+    Args:
+        sync_data: Exported inventory data from another fort
+        merge_strategy: How to handle conflicts (add/replace/merge)
+        current_user: Authenticated user performing the import
+
+    Returns:
+        Import summary with statistics
+    """
+    try:
+        if 'inventory' not in sync_data:
+            raise HTTPException(status_code=400, detail="Invalid sync data format")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        imported_items = sync_data['inventory']
+        added_count = 0
+        updated_count = 0
+        skipped_count = 0
+
+        if merge_strategy == "replace":
+            # Clear existing inventory
+            cursor.execute("DELETE FROM inventory")
+            conn.commit()
+
+        for item in imported_items:
+            # Check if item exists (by name)
+            cursor.execute("SELECT item_id, quantity FROM inventory WHERE name = ?", (item['name'],))
+            existing = cursor.fetchone()
+
+            if existing and merge_strategy == "add":
+                skipped_count += 1
+                continue
+
+            if existing and merge_strategy == "merge":
+                # Update quantity
+                new_quantity = existing[1] + item['quantity']
+                cursor.execute(
+                    "UPDATE inventory SET quantity = ?, last_updated = ? WHERE item_id = ?",
+                    (new_quantity, datetime.now().isoformat(), existing[0])
+                )
+                updated_count += 1
+            else:
+                # Add new item
+                cursor.execute("""
+                    INSERT INTO inventory (name, category, quantity, unit, value, description)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    item['name'], item['category'], item['quantity'],
+                    item['unit'], item['value'], item.get('description')
+                ))
+                added_count += 1
+
+        conn.commit()
+        conn.close()
+
+        logger.info(
+            f"Inventory import completed by {current_user.username}: "
+            f"{added_count} added, {updated_count} updated, {skipped_count} skipped"
+        )
+
+        return {
+            "status": "success",
+            "imported_from": sync_data.get('source_fort', 'unknown'),
+            "merge_strategy": merge_strategy,
+            "imported_by": current_user.username,
+            "import_timestamp": datetime.now().isoformat(),
+            "statistics": {
+                "items_added": added_count,
+                "items_updated": updated_count,
+                "items_skipped": skipped_count,
+                "total_processed": len(imported_items)
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error importing inventory: {e}")
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+
+
+@app.get("/sync/status", tags=["Synchronization"])
+async def get_sync_status():
+    """
+    Get synchronization status and capabilities.
+
+    Educational Note:
+    This endpoint provides metadata about sync capabilities,
+    helping clients understand what can be synchronized.
+    """
+    return {
+        "fort_name": "fishing_fort",
+        "sync_enabled": True,
+        "supported_operations": ["export-inventory", "import-inventory"],
+        "supported_merge_strategies": ["add", "replace", "merge"],
+        "last_export": None,  # Would track in production
+        "last_import": None,  # Would track in production
+        "sync_format_version": "1.0"
+    }
+
+
+# ============================================================================
+# Protected Endpoints (Require Authentication)
+# ============================================================================
+
+@app.delete("/inventory/{item_id}/protected", tags=["Protected"])
+async def delete_inventory_item_protected(
+    item_id: int = Path(..., description="ID of item to delete"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete an inventory item (requires authentication).
+
+    Educational Note:
+    This endpoint demonstrates protected routes using authentication.
+    Only authenticated users can delete inventory items.
+
+    To access this endpoint:
+    1. Get a token from /auth/login
+    2. Include it in the Authorization header: Bearer <token>
+    3. Make the DELETE request
+
+    Args:
+        item_id: ID of item to delete
+        current_user: Authenticated user (automatically injected)
+
+    Returns:
+        Deletion confirmation message
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Check if item exists
+        cursor.execute("SELECT * FROM inventory WHERE item_id = ?", (item_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
+
+        # Delete the item
+        cursor.execute("DELETE FROM inventory WHERE item_id = ?", (item_id,))
+        conn.commit()
+        conn.close()
+
+        logger.info(
+            f"Item {item_id} deleted by user '{current_user.username}' "
+            f"(role: {current_user.role})"
+        )
+
+        return {
+            "message": f"Item {item_id} deleted successfully",
+            "deleted_by": current_user.username,
+            "deleted_at": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting item {item_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete item: {str(e)}")
+
+
+@app.get("/admin/stats", tags=["Protected"])
+async def get_admin_stats(current_user: User = Depends(get_current_user)):
+    """
+    Get comprehensive system and database statistics (requires authentication).
+
+    Educational Note:
+    This endpoint combines multiple data sources to provide an admin dashboard view.
+    It demonstrates:
+    1. Authentication requirement
+    2. Aggregating data from multiple sources
+    3. Providing comprehensive system insights
+
+    Returns:
+        Detailed system and database statistics
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Get inventory stats
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_items,
+                SUM(quantity) as total_quantity,
+                SUM(quantity * value) as total_value,
+                COUNT(DISTINCT category) as unique_categories
+            FROM inventory
+        """)
+        inv_stats = dict_from_row(cursor.fetchone())
+
+        # Get catch stats
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_catches,
+                SUM(quantity) as total_fish,
+                SUM(weight_pounds) as total_weight,
+                COUNT(DISTINCT fish_type) as unique_species
+            FROM catch_records
+        """)
+        catch_stats = dict_from_row(cursor.fetchone())
+
+        # Get database size
+        cursor.execute("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()")
+        db_size = cursor.fetchone()[0]
+
+        conn.close()
+
+        # Get disk usage
+        total, used, free = shutil.disk_usage("/")
+
+        logger.info(f"Admin stats accessed by user '{current_user.username}'")
+
+        return {
+            "requested_by": current_user.username,
+            "requested_at": datetime.now().isoformat(),
+            "inventory": {
+                "total_items": inv_stats.get('total_items', 0),
+                "total_quantity": inv_stats.get('total_quantity', 0),
+                "total_value": inv_stats.get('total_value', 0.0),
+                "unique_categories": inv_stats.get('unique_categories', 0)
+            },
+            "catches": {
+                "total_records": catch_stats.get('total_catches', 0),
+                "total_fish": catch_stats.get('total_fish', 0),
+                "total_weight_lbs": catch_stats.get('total_weight', 0.0),
+                "unique_species": catch_stats.get('unique_species', 0)
+            },
+            "database": {
+                "size_mb": db_size / (1024 * 1024) if db_size else 0,
+                "path": str(DB_PATH)
+            },
+            "system": {
+                "disk_total_gb": total / (1024**3),
+                "disk_used_gb": used / (1024**3),
+                "disk_free_gb": free / (1024**3),
+                "disk_percent_used": (used / total) * 100
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting admin stats: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
 
 
 # ============================================================================
