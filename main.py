@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.models import UserProfile, ChapterStatus
 from src.models.outpost import Outpost, OutpostType, OutpostStatus
+from src.ui.chapters.chapter1 import render_chapter1_page
+from src.ui.chapters.chapter2 import render_chapter2_page
 
 # Page configuration
 st.set_page_config(
@@ -284,7 +286,7 @@ def render_outposts_page():
 def render_chapter_placeholder(chapter_num: int):
     """Render a placeholder for chapter pages."""
     st.title(f"Chapter {chapter_num}")
-    st.info(f"Chapter {chapter_num} content will be implemented in Phase 2!")
+    st.info(f"Chapter {chapter_num} content coming soon!")
 
 
 def render_settings_page():
@@ -370,9 +372,9 @@ def main():
     elif page == "Outposts":
         render_outposts_page()
     elif page == "Chapter 1":
-        render_chapter_placeholder(1)
+        render_chapter1_page()
     elif page == "Chapter 2":
-        render_chapter_placeholder(2)
+        render_chapter2_page()
     elif page == "Chapter 3":
         render_chapter_placeholder(3)
     elif page == "Settings":
