@@ -63,6 +63,16 @@ htmlcov/
 # Streamlit
 .streamlit/secrets.toml
 
+# Node.js / Frontend
+node_modules/
+npm-debug.log
+yarn-error.log
+yarn-debug.log
+.pnp
+.pnp.js
+build/
+.DS_Store
+
 # SSH Keys
 *.pem
 *.key
