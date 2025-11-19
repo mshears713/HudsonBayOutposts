@@ -15,10 +15,11 @@ access to protected API endpoints.
 """
 
 import requests
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime, timedelta
 import logging
 from pathlib import Path
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +38,33 @@ class OutpostAPIClient:
     include bearer tokens in subsequent requests to protected endpoints.
     """
 
-    def __init__(self, base_url: str, timeout: int = 10, token: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: int = 10,
+        token: Optional[str] = None,
+        max_retries: int = 3,
+        retry_backoff_factor: float = 2.0
+    ):
         """
-        Initialize API client with optional authentication.
+        Initialize API client with optional authentication and retry configuration.
 
         Educational Note:
         The client can be initialized with or without a token. If you have
         a token already, pass it here. Otherwise, use the login() method
         to obtain one.
 
+        Phase 3 Enhancement (Step 28):
+        The client now supports automatic retries with exponential backoff for
+        network failures and transient errors, improving reliability in
+        distributed systems.
+
         Args:
             base_url: Base URL of the outpost API (e.g., http://192.168.1.100:8000)
             timeout: Request timeout in seconds
             token: Optional pre-existing authentication token
+            max_retries: Maximum number of retry attempts for failed requests
+            retry_backoff_factor: Multiplier for exponential backoff (default: 2.0)
 
         Example:
             # Without authentication
@@ -57,6 +72,13 @@ class OutpostAPIClient:
 
             # With pre-existing token
             client = OutpostAPIClient("http://192.168.1.100:8000", token="eyJhbG...")
+
+            # With custom retry configuration
+            client = OutpostAPIClient(
+                "http://192.168.1.100:8000",
+                max_retries=5,
+                retry_backoff_factor=1.5
+            )
 
             # Login to get token
             client = OutpostAPIClient("http://192.168.1.100:8000")
@@ -67,6 +89,10 @@ class OutpostAPIClient:
         self.session = requests.Session()
         self._token: Optional[str] = token
         self._token_expires_at: Optional[datetime] = None
+
+        # Retry configuration
+        self.max_retries = max_retries
+        self.retry_backoff_factor = retry_backoff_factor
 
         # If token provided, set it in session headers
         if self._token:
@@ -239,16 +265,168 @@ class OutpostAPIClient:
         """
         return self._make_request('GET', '/auth/users')
 
+    # ========================================================================
+    # Enhanced Error Handling & Retry Logic (Phase 3, Step 28)
+    # ========================================================================
+
+    def _is_retryable_error(self, exception: Exception) -> bool:
+        """
+        Determine if an error is retryable.
+
+        Educational Note:
+        Not all errors should trigger retries. Network errors and timeouts
+        are typically transient and worth retrying. Authentication errors,
+        client errors (4xx), and validation errors should not be retried.
+
+        Args:
+            exception: The exception that occurred
+
+        Returns:
+            True if the error is retryable, False otherwise
+        """
+        # Network errors - should retry
+        if isinstance(exception, (requests.exceptions.ConnectionError,
+                                 requests.exceptions.Timeout)):
+            return True
+
+        # HTTP errors - check status code
+        if isinstance(exception, requests.exceptions.HTTPError):
+            # Retry on server errors (5xx) but not client errors (4xx)
+            if exception.response is not None:
+                status_code = exception.response.status_code
+                # Retry on 500, 502, 503, 504 (server errors)
+                return status_code in [500, 502, 503, 504]
+
+        # Don't retry other errors
+        return False
+
+    def _calculate_backoff_delay(self, attempt: int) -> float:
+        """
+        Calculate exponential backoff delay.
+
+        Educational Note:
+        Exponential backoff prevents overwhelming a struggling server.
+        Each retry waits longer than the last:
+        - Attempt 1: 1 second
+        - Attempt 2: 2 seconds
+        - Attempt 3: 4 seconds
+        - Attempt 4: 8 seconds
+        etc.
+
+        This gives the server time to recover and reduces network congestion.
+
+        Args:
+            attempt: Current retry attempt number (0-indexed)
+
+        Returns:
+            Delay in seconds
+        """
+        # Exponential backoff: base_delay * (backoff_factor ^ attempt)
+        base_delay = 1.0
+        delay = base_delay * (self.retry_backoff_factor ** attempt)
+
+        logger.debug(f"Calculated backoff delay: {delay:.2f}s for attempt {attempt}")
+        return delay
+
+    def _make_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict] = None,
+        json_data: Optional[Dict] = None,
+        files: Optional[Dict] = None,
+        retry_enabled: bool = True
+    ) -> requests.Response:
+        """
+        Make HTTP request with automatic retry logic.
+
+        Educational Note:
+        This method implements the retry pattern with exponential backoff:
+        1. Try the request
+        2. If it fails with a retryable error, wait (with increasing delays)
+        3. Try again up to max_retries times
+        4. If all retries fail, raise the last exception
+
+        Args:
+            method: HTTP method
+            url: Full URL to request
+            params: Query parameters
+            json_data: JSON body data
+            files: Files for upload
+            retry_enabled: Whether to enable retries (default: True)
+
+        Returns:
+            Response object if successful
+
+        Raises:
+            Exception from last retry attempt if all retries fail
+        """
+        last_exception = None
+        max_attempts = self.max_retries + 1 if retry_enabled else 1
+
+        for attempt in range(max_attempts):
+            try:
+                logger.debug(f"Request attempt {attempt + 1}/{max_attempts}: {method} {url}")
+
+                response = self.session.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=json_data,
+                    files=files,
+                    timeout=self.timeout
+                )
+                response.raise_for_status()
+
+                # Success!
+                if attempt > 0:
+                    logger.info(f"Request succeeded on attempt {attempt + 1}/{max_attempts}")
+
+                return response
+
+            except Exception as e:
+                last_exception = e
+
+                # Check if we should retry
+                if attempt < max_attempts - 1 and self._is_retryable_error(e):
+                    delay = self._calculate_backoff_delay(attempt)
+                    logger.warning(
+                        f"Request failed (attempt {attempt + 1}/{max_attempts}): {str(e)}. "
+                        f"Retrying in {delay:.2f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    # Last attempt or non-retryable error
+                    logger.error(
+                        f"Request failed on attempt {attempt + 1}/{max_attempts}: {str(e)}"
+                    )
+                    raise
+
+        # Should never reach here, but just in case
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Request failed with unknown error")
+
     def _make_request(
         self,
         method: str,
         endpoint: str,
         params: Optional[Dict] = None,
         json_data: Optional[Dict] = None,
-        files: Optional[Dict] = None
+        files: Optional[Dict] = None,
+        retry_enabled: bool = True
     ) -> Optional[Any]:
         """
-        Make an HTTP request with error handling.
+        Make an HTTP request with enhanced error handling and retry logic.
+
+        Educational Note:
+        This method provides a clean interface for making API requests while
+        handling common failure scenarios automatically. It uses the retry
+        mechanism for network failures and provides detailed error messages.
+
+        Phase 3 Enhancement (Step 28):
+        Now includes automatic retries with exponential backoff for transient
+        failures, improving reliability in distributed systems.
 
         Args:
             method: HTTP method (GET, POST, etc.)
@@ -256,6 +434,7 @@ class OutpostAPIClient:
             params: Query parameters
             json_data: JSON body data
             files: Files for upload
+            retry_enabled: Whether to enable retries (default: True)
 
         Returns:
             Response data or None if failed
@@ -263,15 +442,14 @@ class OutpostAPIClient:
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
 
         try:
-            response = self.session.request(
+            response = self._make_request_with_retry(
                 method=method,
                 url=url,
                 params=params,
-                json=json_data,
+                json_data=json_data,
                 files=files,
-                timeout=self.timeout
+                retry_enabled=retry_enabled
             )
-            response.raise_for_status()
 
             # Return JSON if content type is JSON
             if 'application/json' in response.headers.get('Content-Type', ''):
@@ -280,16 +458,33 @@ class OutpostAPIClient:
                 return response
 
         except requests.exceptions.Timeout:
-            logger.error(f"Request timed out: {url}")
+            logger.error(f"Request timed out after {self.max_retries} retries: {url}")
             return None
-        except requests.exceptions.ConnectionError:
-            logger.error(f"Connection failed: {url}")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection failed after {self.max_retries} retries: {url}")
+            logger.error(f"  Hint: Check if the API server is running at {self.base_url}")
             return None
         except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error: {e}")
+            status_code = e.response.status_code if e.response else "unknown"
+            logger.error(f"HTTP {status_code} error: {url}")
+
+            # Provide helpful error messages based on status code
+            if status_code == 401:
+                logger.error("  Hint: Authentication required. Did you call login()?")
+            elif status_code == 403:
+                logger.error("  Hint: Permission denied. Check user role/permissions.")
+            elif status_code == 404:
+                logger.error("  Hint: Endpoint not found. Check the API path.")
+            elif status_code == 422:
+                logger.error("  Hint: Validation error. Check request data format.")
+            elif isinstance(status_code, int) and 500 <= status_code < 600:
+                logger.error("  Hint: Server error. Check API logs for details.")
+
             return None
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"Unexpected error: {url}")
+            logger.error(f"  Error type: {type(e).__name__}")
+            logger.error(f"  Error message: {str(e)}")
             return None
 
     # Health and Status
