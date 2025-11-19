@@ -9,9 +9,15 @@ The application follows modern async patterns with FastAPI and PostgreSQL,
 supporting multi-node distributed system visualization.
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 import os
+
+from database import get_session
+from models import Outpost
+from schemas import OutpostResponse, HealthResponse, MessageResponse
 
 # Initialize FastAPI application with metadata
 app = FastAPI(
@@ -22,12 +28,23 @@ app = FastAPI(
     redoc_url="/redoc",  # ReDoc documentation
 )
 
+# Configure CORS for frontend access
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
 # TODO: Add global exception handlers for better error handling
 # TODO: Add request logging middleware
 # TODO: Add rate limiting for production deployment
 
 
-@app.get("/")
+@app.get("/", response_model=MessageResponse)
 async def root():
     """
     Root endpoint returning a welcome message.
@@ -45,7 +62,7 @@ async def root():
     }
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     """
     Health check endpoint for monitoring and load balancers.
@@ -54,6 +71,19 @@ async def health_check():
         dict: Health status of the API
     """
     return {"status": "healthy", "service": "Hudson Bay API"}
+
+
+@app.get("/outposts", response_model=list[OutpostResponse])
+async def get_outposts(session: AsyncSession = Depends(get_session)):
+    """
+    Get all outposts from the database.
+
+    Returns:
+        list[OutpostResponse]: List of all outposts
+    """
+    result = await session.execute(select(Outpost))
+    outposts = result.scalars().all()
+    return outposts
 
 
 if __name__ == "__main__":
