@@ -9,15 +9,23 @@ The application follows modern async patterns with FastAPI and PostgreSQL,
 supporting multi-node distributed system visualization.
 """
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from typing import Optional
+from datetime import datetime
 import os
 
-from database import get_session
-from models import Outpost
-from schemas import OutpostResponse, HealthResponse, MessageResponse
+from database import get_session, init_db
+from models import Outpost, ExpeditionLog
+from schemas import (
+    OutpostResponse,
+    ExpeditionLogCreate,
+    ExpeditionLogResponse,
+    HealthResponse,
+    MessageResponse
+)
 
 # Initialize FastAPI application with metadata
 app = FastAPI(
@@ -39,9 +47,11 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# TODO: Add global exception handlers for better error handling
-# TODO: Add request logging middleware
-# TODO: Add rate limiting for production deployment
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    await init_db()
 
 
 @app.get("/", response_model=MessageResponse)
@@ -84,6 +94,107 @@ async def get_outposts(session: AsyncSession = Depends(get_session)):
     result = await session.execute(select(Outpost))
     outposts = result.scalars().all()
     return outposts
+
+
+@app.get("/outposts/{outpost_id}", response_model=OutpostResponse)
+async def get_outpost(outpost_id: str, session: AsyncSession = Depends(get_session)):
+    """
+    Get a specific outpost by ID.
+
+    Args:
+        outpost_id: UUID of the outpost
+
+    Returns:
+        OutpostResponse: Outpost details
+
+    Raises:
+        HTTPException: 404 if outpost not found
+    """
+    result = await session.execute(
+        select(Outpost).where(Outpost.id == outpost_id)
+    )
+    outpost = result.scalar_one_or_none()
+
+    if not outpost:
+        raise HTTPException(status_code=404, detail="Outpost not found")
+
+    return outpost
+
+
+@app.post("/expedition/logs", response_model=ExpeditionLogResponse, status_code=201)
+async def create_expedition_log(
+    log: ExpeditionLogCreate,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Create a new expedition log entry.
+
+    Args:
+        log: Log data to create
+
+    Returns:
+        ExpeditionLogResponse: Created log entry
+
+    Raises:
+        HTTPException: 404 if outpost not found
+    """
+    # Verify outpost exists
+    result = await session.execute(
+        select(Outpost).where(Outpost.id == log.outpost_id)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Outpost not found")
+
+    # Create log entry
+    db_log = ExpeditionLog(
+        outpost_id=log.outpost_id,
+        event_type=log.event_type,
+        details=log.details,
+        timestamp=log.timestamp or datetime.utcnow()
+    )
+
+    session.add(db_log)
+    await session.commit()
+    await session.refresh(db_log)
+
+    return db_log
+
+
+@app.get("/expedition/logs", response_model=list[ExpeditionLogResponse])
+async def get_expedition_logs(
+    outpost_id: Optional[str] = Query(None, description="Filter by outpost ID"),
+    event_type: Optional[str] = Query(None, description="Filter by event type"),
+    limit: int = Query(50, ge=1, le=1000, description="Maximum number of logs to return"),
+    offset: int = Query(0, ge=0, description="Number of logs to skip"),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Get expedition logs with optional filtering and pagination.
+
+    Args:
+        outpost_id: Filter logs by outpost ID (optional)
+        event_type: Filter logs by event type (optional)
+        limit: Maximum number of logs to return (default: 50)
+        offset: Number of logs to skip (default: 0)
+
+    Returns:
+        list[ExpeditionLogResponse]: List of expedition logs
+    """
+    query = select(ExpeditionLog).order_by(ExpeditionLog.timestamp.desc())
+
+    # Apply filters
+    if outpost_id:
+        query = query.where(ExpeditionLog.outpost_id == outpost_id)
+    if event_type:
+        query = query.where(ExpeditionLog.event_type == event_type)
+
+    # Apply pagination
+    query = query.limit(limit).offset(offset)
+
+    result = await session.execute(query)
+    logs = result.scalars().all()
+
+    return logs
 
 
 if __name__ == "__main__":

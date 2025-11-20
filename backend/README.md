@@ -2,51 +2,91 @@
 
 FastAPI-based backend providing REST APIs for the Hudson Bay Interactive Expedition Console.
 
-## Overview
-
-This backend service manages expedition data, outpost information, and live Raspberry Pi data aggregation. It uses:
-
-- **FastAPI** for async REST APIs
-- **PostgreSQL** for persistent storage
-- **SQLAlchemy** (async) for ORM
-- **Alembic** for database migrations
-- **httpx** for async HTTP client to Raspberry Pi outposts
-
-## Setup
-
-### Prerequisites
-
-- Python 3.10 or higher
-- PostgreSQL 12 or higher
-- Virtual environment
-
-### Installation
-
-1. **Create and activate virtual environment:**
+## Quick Start
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-```
-
-2. **Install dependencies:**
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
+
+# Set environment variable
+export DATABASE_URL="postgresql+asyncpg://hudsonbay:hudsonbay@localhost:5432/hudsonbay"
+
+# Run migrations (creates tables)
+alembic upgrade head
+
+# Seed sample data
+python seed_data.py
+
+# Start server
+uvicorn main:app --reload
 ```
 
-3. **Configure environment variables:**
+**Server runs at:** http://localhost:8000
+**API Docs:** http://localhost:8000/docs
 
-Create a `.env` file in the backend directory:
+## API Endpoints
 
-```env
-DATABASE_URL=postgresql+asyncpg://hudsonbay:hudsonbay@localhost:5432/hudsonbay
-CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
-SQL_ECHO=false
-LOG_LEVEL=INFO
+### Core Endpoints
+
+- `GET /` - Welcome message and API info
+- `GET /health` - Health check for monitoring
+
+### Outposts
+
+- `GET /outposts` - List all outposts
+- `GET /outposts/{id}` - Get specific outpost by ID
+
+### Expedition Logs
+
+- `GET /expedition/logs` - List logs with filtering
+  - Query params: `outpost_id`, `event_type`, `limit`, `offset`
+- `POST /expedition/logs` - Create new log entry
+
+### Example Requests
+
+**Get all outposts:**
+```bash
+curl http://localhost:8000/outposts
 ```
 
-4. **Set up PostgreSQL database:**
+**Get logs for specific outpost:**
+```bash
+curl "http://localhost:8000/expedition/logs?outpost_id=UUID&limit=10"
+```
+
+**Create a log entry:**
+```bash
+curl -X POST http://localhost:8000/expedition/logs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "outpost_id": "UUID",
+    "event_type": "sensor_reading",
+    "details": {"temperature": 22.5, "humidity": 60}
+  }'
+```
+
+## Database Models
+
+### Outpost
+- `id` (UUID) - Primary key
+- `name` (String) - Unique outpost name
+- `location_lat` (Float) - Latitude
+- `location_lon` (Float) - Longitude
+- `description` (Text) - Description
+- `api_endpoint` (String) - API URL
+- `created_at`, `updated_at` - Timestamps
+
+### ExpeditionLog
+- `id` (UUID) - Primary key
+- `timestamp` (DateTime) - Event time
+- `outpost_id` (UUID) - Foreign key to Outpost
+- `event_type` (String) - Event category
+- `details` (JSON) - Event data
+- `created_at` - Creation timestamp
+
+## Database Setup
+
+### Create Database
 
 ```sql
 CREATE USER hudsonbay WITH PASSWORD 'hudsonbay';
@@ -54,212 +94,89 @@ CREATE DATABASE hudsonbay OWNER hudsonbay;
 GRANT ALL PRIVILEGES ON DATABASE hudsonbay TO hudsonbay;
 ```
 
-5. **Run database migrations:**
+### Run Migrations
 
 ```bash
-# Generate initial migration (if needed)
-alembic revision --autogenerate -m "Initial schema"
+# Generate migration (after model changes)
+alembic revision --autogenerate -m "Description"
 
 # Apply migrations
 alembic upgrade head
+
+# Rollback
+alembic downgrade -1
 ```
 
-6. **Start the development server:**
+### Seed Data
 
 ```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+python seed_data.py
 ```
 
-## Database Migrations
+This creates 4 sample outposts with locations and sample log entries.
 
-### Alembic Commands
+## Environment Variables
 
-- **Create a new migration:**
-  ```bash
-  alembic revision --autogenerate -m "Description of changes"
-  ```
+Copy `.env.example` to `.env` and configure:
 
-- **Apply migrations:**
-  ```bash
-  alembic upgrade head
-  ```
-
-- **Rollback last migration:**
-  ```bash
-  alembic downgrade -1
-  ```
-
-- **View migration history:**
-  ```bash
-  alembic history
-  ```
-
-- **Check current version:**
-  ```bash
-  alembic current
-  ```
-
-### Migration Workflow
-
-1. Modify models in `models.py`
-2. Generate migration: `alembic revision --autogenerate -m "Description"`
-3. Review generated migration in `alembic/versions/`
-4. Apply migration: `alembic upgrade head`
-
-**Note:** Always review auto-generated migrations before applying them!
-
-## API Documentation
-
-Once the server is running, visit:
-
-- **Swagger UI:** http://localhost:8000/docs
-- **ReDoc:** http://localhost:8000/redoc
-
-## Project Structure
-
-```
-backend/
-├── main.py              # FastAPI application entrypoint
-├── database.py          # Async database engine and session management
-├── models.py            # SQLAlchemy ORM models
-├── schemas.py           # Pydantic schemas for request/response (to be added)
-├── api_client.py        # HTTP client for Raspberry Pi outposts (to be added)
-├── scheduler.py         # Background tasks for live data fetching (to be added)
-├── routes/              # API route modules
-│   └── (routers to be added)
-├── alembic/             # Database migration scripts
-│   ├── versions/        # Migration version files
-│   └── env.py           # Alembic environment configuration
-├── alembic.ini          # Alembic configuration
-├── requirements.txt     # Python dependencies
-└── README.md            # This file
+```env
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/hudsonbay
+CORS_ORIGINS=http://localhost:3000
+SQL_ECHO=false
+LOG_LEVEL=INFO
 ```
 
-## Database Models
+## Development
 
-### Outpost
-
-Represents a Raspberry Pi outpost in the expedition network.
-
-**Fields:**
-- `id` (UUID): Primary key
-- `name` (String): Unique outpost name
-- `location_lat` (Float): Latitude (-90 to 90)
-- `location_lon` (Float): Longitude (-180 to 180)
-- `description` (Text): Outpost description
-- `api_endpoint` (String): URL for outpost API
-- `created_at` (DateTime): Creation timestamp
-- `updated_at` (DateTime): Last update timestamp
-
-### ExpeditionLog
-
-Represents a log entry from an outpost.
-
-**Fields:**
-- `id` (UUID): Primary key
-- `timestamp` (DateTime): Event timestamp
-- `outpost_id` (UUID): Foreign key to Outpost
-- `event_type` (String): Type of event (e.g., "sensor_reading", "alert")
-- `details` (JSON): Event-specific data
-- `created_at` (DateTime): Database insertion timestamp
-
-## API Endpoints (Planned)
-
-### Outposts
-
-- `GET /outposts` - List all outposts
-- `GET /outposts/{id}` - Get outpost details
-- `GET /outposts/{id}/live` - Get live data from outpost
-
-### Expedition Logs
-
-- `GET /expedition/logs` - List logs with filters and pagination
-- `POST /expedition/logs` - Create new log entry
-
-### Timeline
-
-- `GET /timeline` - Get timeline events
-
-### Achievements
-
-- `GET /achievements` - List achievements
-- `PUT /achievements/{id}` - Update achievement status
-
-## Testing
-
-### Run unit tests:
-
-```bash
-pytest tests/unit/
-```
-
-### Run integration tests:
-
-```bash
-pytest tests/integration/
-```
-
-### Run all tests with coverage:
-
-```bash
-pytest --cov=. --cov-report=html
-```
-
-## Development Tips
-
-### Auto-reload with Uvicorn
-
-The development server automatically reloads on code changes:
+### Auto-reload Server
 
 ```bash
 uvicorn main:app --reload
 ```
 
-### SQL Query Logging
+### View Logs
 
-Enable SQL echo in `.env`:
-
+Enable SQL logging:
 ```env
 SQL_ECHO=true
 ```
 
-### Database Connection Issues
+### Testing
 
-If you encounter connection errors:
+```bash
+pytest tests/
+```
 
-1. Verify PostgreSQL is running: `pg_isready`
-2. Check DATABASE_URL format
-3. Verify user permissions
-4. Check firewall settings
+## Project Structure
 
-### Async Best Practices
-
-- Always use `await` with async functions
-- Use `async with` for sessions
-- Avoid blocking operations in async functions
-- Use `asyncio.gather()` for concurrent operations
+```
+backend/
+├── main.py              # FastAPI app and endpoints
+├── database.py          # Async database setup
+├── models.py            # SQLAlchemy ORM models
+├── schemas.py           # Pydantic validation schemas
+├── api_client.py        # HTTP client for Pi outposts
+├── seed_data.py         # Database seeding script
+├── alembic/             # Migration scripts
+├── requirements.txt     # Python dependencies
+└── .env.example         # Environment template
+```
 
 ## Troubleshooting
 
-### "Database does not exist" Error
+**Database connection error:**
+- Verify PostgreSQL is running: `pg_isready`
+- Check DATABASE_URL format
+- Ensure user has permissions
 
+**Import errors:**
 ```bash
-createdb -U hudsonbay hudsonbay
+pip install -r requirements.txt
 ```
 
-### "Permission denied" Error
-
-```sql
-GRANT ALL PRIVILEGES ON DATABASE hudsonbay TO hudsonbay;
-```
-
-### Migration Conflicts
-
+**Migration conflicts:**
 ```bash
-# Reset to base
 alembic downgrade base
-
-# Reapply migrations
 alembic upgrade head
 ```
 
